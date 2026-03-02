@@ -1,0 +1,146 @@
+<!-- <!DOCTYPE html>
+<html lang="en">
+  <head>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.11.11/lib/p5.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/p5@1.11.11/lib/addons/p5.sound.min.js"></script>
+    
+    
+    
+    <link rel="stylesheet" type="text/css" href="style.css">
+    <meta charset="utf-8" />
+
+    <title>Steam Owned Games Test</title>
+    
+    <style>
+      body { font-family: system-ui, sans-serif; padding: 16px; }
+      input { width: 520px; }
+      pre { background: #f6f6f6; padding: 12px; border-radius: 8px; overflow:auto; }
+    </style>
+
+
+
+
+  </head>
+  <body>
+    <main>
+    </main>
+
+    <h3>Steam Owned Games Test</h3>
+    <p>粘贴 Steam 主页链接（/profiles/... 或 /id/...）</p>
+    <input id="p" placeholder="https://steamcommunity.com/id/xxx 或 https://steamcommunity.com/profiles/7656..." />
+    <button id="go">Fetch</button>
+    <pre id="out">等待输入…</pre>
+
+    <script>
+      document.getElementById("go").onclick = async () => {
+        const profile = document.getElementById("p").value.trim();
+        const out = document.getElementById("out");
+        out.textContent = "Fetching…";
+
+        const r = await fetch(`/api/owned?top=30&profile=${encodeURIComponent(profile)}`);
+        const j = await r.json();
+        out.textContent = JSON.stringify(j, null, 2);
+      };
+    </script>
+
+
+
+  </body>
+</html> -->
+
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Steam Time Donut</title>
+  <script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/p5.min.js"></script>
+  <style>
+    html, body {
+      height: 100%;
+      margin: 0;
+      font-family: system-ui, sans-serif;
+      background: #f5f5f5;
+    }
+
+    /* 上下两块：上 UI，下画布 */
+    #app {
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+    }
+
+    #ui {
+      padding: 12px 14px;
+      background: rgba(255,255,255,0.9);
+      border-bottom: 1px solid rgba(0,0,0,0.08);
+    }
+
+    #row {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    input {
+      width: min(680px, 70vw);
+      padding: 8px 10px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,0.15);
+      outline: none;
+    }
+
+    button {
+      padding: 8px 12px;
+      border-radius: 10px;
+      border: 1px solid rgba(0,0,0,0.15);
+      background: white;
+      cursor: pointer;
+    }
+
+    .hint {
+      font-size: 12px;
+      opacity: .7;
+      margin-top: 8px;
+      line-height: 1.4;
+    }
+
+    /* 画布区域：占满剩余空间 */
+    #canvasWrap {
+      flex: 1;
+      display: flex;
+      /* 让 canvas 居中（你想铺满也行） */
+      justify-content: center;
+      align-items: stretch;
+      padding: 12px;
+      box-sizing: border-box;
+    }
+
+    /* 可选：给画布区域一个边框感 */
+    #canvasWrap canvas {
+      border-radius: 14px;
+      box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+      background: #f5f5f5;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="app">
+    <div id="ui">
+      <div id="row">
+        <div>Steam 主页链接：</div>
+        <input id="profile" placeholder="https://steamcommunity.com/id/xxx 或 /profiles/7656..." />
+        <button id="go">Generate</button>
+      </div>
+      <div class="hint">
+        甜甜圈 = 长期时间结构（playtime_forever）｜小亮点 = 最近两周有玩（playtime_2weeks > 0）｜阈值：min_ratio=0.05
+      </div>
+    </div>
+
+    <div id="canvasWrap"></div>
+  </div>
+
+  <script src="sketch.js"></script>
+</body>
+</html>
