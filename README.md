@@ -110,12 +110,6 @@ If an online deployment is available, open the live link and paste a Steam profi
 - A valid Steam Web API key is required for local use.
 - The target Steam profile must have public game details; private libraries may return incomplete or unavailable data.
 
-### Detail Views
-
-<div align="center">
-  <img src="images/detail-1.png" width="48%" style="display:inline-block; vertical-align:top; margin:0 24px 12px 0;" />
-  <img src="images/detail-2.png" width="48%" style="display:inline-block; vertical-align:top; margin:0 0 12px 0;" />
-</div>
 
 ## Credits / Acknowledgements
 
