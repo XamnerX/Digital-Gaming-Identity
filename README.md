@@ -91,10 +91,6 @@ http://localhost:3000
 
 7. Paste a Steam profile link into the input field and click **Generate**.
 
-### Online Version
-
-If an online deployment is available, open the live link and paste a Steam profile URL to generate the visualisation.
-
 ## Requirements
 
 ### Hardware
