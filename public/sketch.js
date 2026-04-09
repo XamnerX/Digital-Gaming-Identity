@@ -5,6 +5,19 @@ let avatarImg = null;
 let statusText = "";
 
 /**
+ * Update the current UI status text.
+ * Used for both the canvas placeholder and the hint line above.
+ */
+function setStatus(msg) {
+  statusText = msg || "";
+
+  const hint = document.getElementById("hintText");
+  if (hint) {
+    hint.textContent = statusText || "Paste a Steam profile link and click Generate.";
+  }
+}
+
+/**
  * Titles excluded from persona reading.
  * These entries are utility-like or not representative of play preference.
  */
@@ -155,6 +168,8 @@ function setup() {
   angleMode(RADIANS);
   textFont("system-ui");
 
+  setStatus(statusText);
+
   document.getElementById("go").onclick = loadData;
 }
 
@@ -165,11 +180,11 @@ async function loadData() {
   const profile = document.getElementById("profile").value.trim();
 
   if (!profile) {
-    statusText = "请先粘贴 Steam 主页链接";
+    setStatus("Please paste a Steam profile link");
     return;
   }
 
-  statusText = "Fetching...";
+  setStatus("Fetching...");
   data = null;
   profileStats = null;
   persona = null;
@@ -189,13 +204,13 @@ async function loadData() {
     const profileJson = await profileRes.json();
 
     if (ownedJson.error) {
-      statusText = `Error: ${ownedJson.error}`;
+      setStatus(`Error: ${ownedJson.error}`);
       syncCanvasSize();
       return;
     }
 
     if (profileJson.error) {
-      statusText = `Error: ${profileJson.error}`;
+      setStatus(`Error: ${profileJson.error}`);
       syncCanvasSize();
       return;
     }
@@ -218,14 +233,15 @@ async function loadData() {
     persona = buildPersona(data, profileStats);
 
     const totalHours = Math.round((ownedJson.total_playtime_forever_min || 0) / 60);
-    statusText =
+    setStatus(
       `OK: top ${ownedJson.selected_count}, total ${totalHours} hours | ` +
       `metadata ${profileJson.used_game_count}/${profileJson.processed_game_count} ` +
-      `(skipped ${profileJson.skipped_game_count})`;
+      `(skipped ${profileJson.skipped_game_count})`
+    );
 
     syncCanvasSize();
   } catch (error) {
-    statusText = `Fetch failed: ${String(error)}`;
+    setStatus(`Fetch failed: ${String(error)}`);
     data = null;
     profileStats = null;
     persona = null;
@@ -249,7 +265,6 @@ function draw() {
   }
 
   drawHeaderCard(layout.header, persona, data);
-  drawMiddleHeader(layout.middleHeader);
 
   const slices = buildSlicesWithOther(data.selected);
   drawMiddleSection(layout.middle, slices);
@@ -264,16 +279,16 @@ function draw() {
 function drawPlaceholder(layout) {
   const cx = layout.page.x + layout.page.w * 0.5;
   const cy = layout.page.y + layout.page.h * 0.46;
-  const msg = statusText === "Fetching..." ? "Fetching..." : "Waiting for data…";
-
+  const msg = statusText || "Paste a Steam profile link to begin";
+  
   push();
   translate(cx, cy);
 
-  stroke(0, 25);
+  stroke(0, 10);
   strokeWeight(2);
   noFill();
-  circle(0, 0, 220);
-  circle(0, 0, 120);
+  circle(0, 0, 260);
+  circle(0, 0, 160);
 
   noStroke();
   fill(0, 70);
@@ -309,10 +324,7 @@ function getLayout() {
   const headerY = pageY + 22;
   const headerH = 240;
 
-  const middleHeaderY = headerY + headerH + 50;
-  const middleHeaderH = 46;
-
-  const middleY = middleHeaderY + middleHeaderH + 10;
+  const middleY = headerY + headerH + 30;
   const middleH = 320;
 
   const genreRowY = middleY + middleH + gap;
@@ -327,7 +339,6 @@ function getLayout() {
   return {
     page: { x: pageX, y: pageY, w: pageW, h: pageH },
     header: { x: headerLeft, y: headerY, w: headerW, h: headerH },
-    middleHeader: { x: sectionLeft, y: middleHeaderY, w: sectionW, h: middleHeaderH },
     middle: { x: sectionLeft, y: middleY, w: sectionW, h: middleH },
     genreRow: { x: sectionLeft, y: genreRowY, w: sectionW, h: genreRowH },
     bottomCharts: { x: sectionLeft, y: bottomChartsY, w: sectionW, h: bottomChartsH },
@@ -342,16 +353,16 @@ function drawPage(layout) {
 }
 
 function drawMiddleHeader(box) {
-  fill(20);
-  noStroke();
-  textAlign(LEFT, TOP);
+  // fill(20);
+  // noStroke();
+  // textAlign(LEFT, TOP);
 
-  textSize(18);
-  text("Steam Time Donut", box.x, box.y);
+  // textSize(18);
+  // text("Steam Time Donut", box.x, box.y);
 
-  fill(90);
-  textSize(12);
-  text(statusText, box.x, box.y + 28);
+  // fill(90);
+  // textSize(12);
+  // text(statusText, box.x, box.y + 28);
 }
 
 /**
@@ -483,8 +494,9 @@ function drawLegendInBox(slices, box) {
   textAlign(LEFT, CENTER);
   fill(20);
   noStroke();
-  textSize(14);
-  text("Segments (by playtime share)", x, y);
+  textSize(16);
+  // text("Segments (by playtime share)", x, y);
+  text("Steam Time Donut", x, y);
 
   y += titleToListGap;
 
@@ -614,12 +626,7 @@ function drawDonutInBox(slices, box) {
       colorMode(RGB, 255);
       noStroke();
       fill(255);
-      circle(px, py, 8);
-
-      stroke(40, 120);
-      strokeWeight(1.5);
-      noFill();
-      circle(px, py, 12);
+      circle(px, py, 10);
 
       colorMode(HSL, 360, 100, 100, 1);
     }

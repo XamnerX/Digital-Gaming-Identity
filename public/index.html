@@ -2,7 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
-  <title>Steam Time Donut</title>
+  <title>Digital Gaming Identity</title>
   <script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/p5.min.js"></script>
 
   <style>
@@ -25,7 +25,6 @@
       border-bottom: 1px solid rgba(0,0,0,0.08);
     }
 
-    /* 这一条宽度，和你下面“头像左边界 / 内容右边界”对齐 */
     #uiInner {
       width: min(1064px, calc(100vw - 196px));
       margin: 0 auto;
@@ -100,16 +99,16 @@
     <div id="ui">
       <div id="uiInner">
         <div id="row">
-          <div id="rowLabel">Steam 主页链接:</div>
+          <div id="rowLabel">Steam profile link:</div>
           <input
             id="profile"
-            placeholder="https://steamcommunity.com/id/xxx 或 /profiles/7656..."
+            placeholder="https://steamcommunity.com/id/xxx or /profiles/7656..."
           />
           <button id="go">Generate</button>
         </div>
 
         <div class="hint" id="hintText">
-          输入链接后点击 Generate
+          Paste a Steam profile link and click Generate.
         </div>
       </div>
     </div>
