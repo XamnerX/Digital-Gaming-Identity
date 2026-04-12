@@ -1,25 +1,68 @@
+/*
+Digital-Gaming-Identity
+Author: Haiyi Xiao
+Date: Mar 2026
+
+Node/Express server for the Digital Gaming Identity project.
+
+This server:
+1. Serves the frontend from the /public folder
+2. Resolves Steam profile URLs into numeric steamid64 values
+3. Fetches a player's owned games and public profile summary
+4. Fetches Steam store metadata for library analysis
+5. Builds summary data for:
+   - top played games / donut chart
+   - genre/category statistics
+   - simplified play-mode axis analysis
+*/
+
 import "dotenv/config";
 import express from "express";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-const STEAM_KEY = process.env.STEAM_KEY;
+const STEAM_API_KEY = process.env.STEAM_KEY;
 
 app.use(express.static("public"));
 
 /**
- * Cache Steam store app details by appid.
- * This avoids repeated requests for the same game metadata.
- * We also cache null results so failed lookups are not retried forever.
+ * ---------------------------------------------------------------------------
+ * Configuration constants
+ * ---------------------------------------------------------------------------
+ * Keeping project-wide values here makes the code easier to maintain and
+ * avoids unexplained "magic numbers" inside the main logic.
  */
-const appDetailsCache = new Map();
+const DEFAULT_TOP_PLAYED_COUNT = 10;
+const MAX_TOP_PLAYED_COUNT = 20;
+
+const STORE_DETAILS_RETRY_COUNT = 1;
+const STORE_DETAILS_RETRY_DELAY_MS = 400;
 
 /**
- * Category labels we want to keep for the play-mode profile.
- * Other categories may still be collected in all_categories,
- * but only these are counted for axis-based analysis.
+ * Steam store metadata is requested repeatedly across many games.
+ * We cache app detail results by appid so the same game is not fetched
+ * again and again during a single server session.
+ *
+ * Null values are also cached. This prevents repeated retries for titles
+ * that consistently fail or return no usable store metadata.
  */
-const USEFUL_CATEGORIES = new Set([
+const steamAppDetailsCache = new Map();
+
+/**
+ * ---------------------------------------------------------------------------
+ * Category filtering and axis mapping
+ * ---------------------------------------------------------------------------
+ * Steam exposes many category labels, but not all of them are useful for the
+ * kind of behavioural / play-mode reading used in this project.
+ *
+ * We intentionally keep only the categories that help describe:
+ * - solo vs multiplayer play
+ * - co-operative vs competitive play
+ * - local vs online play
+ *
+ * This is a project-specific interpretive model, not an official Steam model.
+ */
+const TRACKED_PLAY_MODE_CATEGORIES = new Set([
   "Single-player",
   "Multi-player",
   "Co-op",
@@ -34,11 +77,19 @@ const USEFUL_CATEGORIES = new Set([
   "MMO"
 ]);
 
+const MAX_TRACKED_CATEGORY_COUNT = TRACKED_PLAY_MODE_CATEGORIES.size;
+
 /**
- * Rules for mapping Steam categories onto three play-mode axes.
- * Each category can contribute to one or more axes.
+ * Rules for translating Steam category labels into three simplified axes.
+ *
+ * Example:
+ * - "Online Co-op" contributes to:
+ *   1) the co-op side of the co-op vs PvP axis
+ *   2) the online side of the local vs online axis
+ *
+ * This allows one category to express more than one behavioural tendency.
  */
-const CATEGORY_AXES = {
+const PLAY_MODE_AXIS_RULES = {
   "Single-player": [{ axis: "singleMulti", side: "left" }],
   "Multi-player": [{ axis: "singleMulti", side: "right" }],
 
@@ -80,49 +131,193 @@ const CATEGORY_AXES = {
 };
 
 /**
- * Safely add a numeric amount into a Map counter.
+ * ---------------------------------------------------------------------------
+ * Small utility helpers
+ * ---------------------------------------------------------------------------
  */
-function addCount(map, key, amount = 1) {
+
+/**
+ * Pause for a short amount of time.
+ * Used for lightweight retry spacing when the Steam store API is inconsistent.
+ */
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Create an Error object with an HTTP status attached.
+ * This is cleaner than throwing plain objects and keeps route-level error
+ * handling consistent.
+ */
+function createHttpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+
+/**
+ * Increment a numeric value stored in a Map.
+ * If the key does not exist yet, it starts from 0.
+ */
+function incrementMapValue(map, key, amount = 1) {
   if (!key) return;
   map.set(key, (map.get(key) || 0) + amount);
 }
 
 /**
  * Convert a Map into a sorted array of { name, value } objects.
- * Sorts descending by value. If topN is provided, trims the result.
+ * Results are sorted descending by numeric value.
+ *
+ * Example output:
+ * [
+ *   { name: "Indie", value: 12 },
+ *   { name: "Adventure", value: 9 }
+ * ]
  */
-function toSortedArray(map, topN = null) {
-  const result = Array.from(map.entries())
+function mapToSortedStatItems(map, limit = null) {
+  const items = Array.from(map.entries())
     .map(([name, value]) => ({ name, value }))
     .sort((a, b) => b.value - a.value);
 
-  return topN == null ? result : result.slice(0, topN);
+  return limit == null ? items : items.slice(0, limit);
 }
 
 /**
- * Normalize text values from Steam metadata.
+ * Normalize labels from Steam metadata so comparisons stay consistent.
+ * This mainly removes accidental whitespace and prevents null/undefined issues.
  */
-function normalizeName(value) {
+function normalizeSteamLabel(value) {
   return String(value || "").trim();
 }
 
 /**
- * Parse a Steam community profile URL.
- * Supports:
- * - https://steamcommunity.com/profiles/7656119...
- * - https://steamcommunity.com/id/vanityName
+ * Fetch JSON from a URL and throw a useful HTTP-style error if the request fails.
+ * This keeps fetch handling consistent across different Steam endpoints.
  */
-function extractSteamIdOrVanity(profileUrl) {
-  try {
-    const url = new URL(profileUrl);
-    const parts = url.pathname.split("/").filter(Boolean);
+async function fetchJson(url, errorContext) {
+  const response = await fetch(url);
 
-    if (parts.length >= 2 && parts[0] === "profiles") {
-      return { steamid: parts[1] };
+  if (!response.ok) {
+    throw createHttpError(
+      502,
+      `${errorContext} failed with HTTP ${response.status}.`
+    );
+  }
+
+  return response.json();
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * Request validation helpers
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * Ensure the server has a Steam API key configured.
+ * This is checked per request so the API returns a readable JSON error
+ * instead of failing in a less clear way.
+ */
+function requireSteamApiKey() {
+  if (!STEAM_API_KEY) {
+    throw createHttpError(500, "Missing STEAM_KEY env var on server.");
+  }
+}
+
+/**
+ * Read and validate the required ?profile= query parameter.
+ */
+function getRequiredProfileQuery(req) {
+  const profile = String(req.query.profile || "").trim();
+
+  if (!profile) {
+    throw createHttpError(400, "Missing ?profile=...");
+  }
+
+  return profile;
+}
+
+/**
+ * Parse and clamp the optional ?top_n= query parameter.
+ * This prevents invalid, negative, or extremely large values.
+ */
+function parseTopPlayedCount(rawValue) {
+  const parsed = Number.parseInt(rawValue, 10);
+
+  if (!Number.isFinite(parsed)) {
+    return DEFAULT_TOP_PLAYED_COUNT;
+  }
+
+  return Math.min(Math.max(parsed, 1), MAX_TOP_PLAYED_COUNT);
+}
+
+/**
+ * Standard route-level error response helper.
+ */
+function sendRouteError(res, error) {
+  if (error?.status && error?.message) {
+    return res.status(error.status).json({ error: error.message });
+  }
+
+  return res.status(500).json({
+    error: "Server error",
+    detail: String(error)
+  });
+}
+
+/**
+ * ---------------------------------------------------------------------------
+ * Steam profile URL parsing
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * Ensure the profile input can be treated as a full URL.
+ * If the user pastes "steamcommunity.com/id/..." without protocol,
+ * we prepend "https://" so URL parsing still works.
+ */
+function ensureUrlProtocol(profileInput) {
+  if (/^https?:\/\//i.test(profileInput)) {
+    return profileInput;
+  }
+
+  return `https://${profileInput}`;
+}
+
+/**
+ * Parse a Steam community profile URL and extract either:
+ * - a numeric steamid64 from /profiles/{steamid}
+ * - a vanity name from /id/{vanityName}
+ *
+ * Supported examples:
+ * - https://steamcommunity.com/profiles/7656119...
+ * - https://steamcommunity.com/id/someVanityName
+ *
+ * This function also checks that the domain is actually Steam community,
+ * which avoids accidentally accepting unrelated URLs with similar paths.
+ */
+function parseSteamProfileIdentifier(profileInput) {
+  try {
+    const normalizedInput = ensureUrlProtocol(profileInput);
+    const url = new URL(normalizedInput);
+    const hostname = url.hostname.toLowerCase();
+    const pathParts = url.pathname.split("/").filter(Boolean);
+
+    const isSteamCommunityHost =
+      hostname === "steamcommunity.com" || hostname.endsWith(".steamcommunity.com");
+
+    if (!isSteamCommunityHost) {
+      return {
+        error: "URL must be from steamcommunity.com."
+      };
     }
 
-    if (parts.length >= 2 && parts[0] === "id") {
-      return { vanity: parts[1] };
+    if (pathParts.length >= 2 && pathParts[0] === "profiles") {
+      return { steamId: pathParts[1] };
+    }
+
+    if (pathParts.length >= 2 && pathParts[0] === "id") {
+      return { vanityName: pathParts[1] };
     }
 
     return {
@@ -134,17 +329,16 @@ function extractSteamIdOrVanity(profileUrl) {
 }
 
 /**
- * Resolve a Steam vanity URL into a numeric steamid64.
+ * Resolve a Steam vanity name into a numeric steamid64 using Steam Web API.
  */
-async function resolveVanityToSteamId(vanity) {
+async function fetchSteamIdFromVanityUrl(vanityName) {
   const url = new URL(
     "https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/"
   );
-  url.searchParams.set("key", STEAM_KEY);
-  url.searchParams.set("vanityurl", vanity);
+  url.searchParams.set("key", STEAM_API_KEY);
+  url.searchParams.set("vanityurl", vanityName);
 
-  const response = await fetch(url);
-  const json = await response.json();
+  const json = await fetchJson(url, "ResolveVanityURL");
   const result = json?.response;
 
   if (result?.success === 1 && result?.steamid) {
@@ -155,79 +349,90 @@ async function resolveVanityToSteamId(vanity) {
 }
 
 /**
- * Resolve either a /profiles/... URL or /id/... URL into a steamid.
- * Throws an error object with status/message so route handlers can respond cleanly.
+ * Resolve either a /profiles/... URL or /id/... URL into a numeric steamid64.
  */
-async function resolveProfileToSteamId(profile) {
-  const parsed = extractSteamIdOrVanity(profile);
+async function resolveSteamProfileToId(profileInput) {
+  const parsedProfile = parseSteamProfileIdentifier(profileInput);
 
-  if (parsed.error) {
-    throw { status: 400, message: parsed.error };
+  if (parsedProfile.error) {
+    throw createHttpError(400, parsedProfile.error);
   }
 
-  if (parsed.steamid) {
-    return parsed.steamid;
+  if (parsedProfile.steamId) {
+    return parsedProfile.steamId;
   }
 
-  const steamid = await resolveVanityToSteamId(parsed.vanity);
-  if (!steamid) {
-    throw {
-      status: 404,
-      message: "Could not resolve vanity URL to steamid (maybe typo)."
-    };
+  const steamId = await fetchSteamIdFromVanityUrl(parsedProfile.vanityName);
+
+  if (!steamId) {
+    throw createHttpError(
+      404,
+      "Could not resolve vanity URL to steamid (maybe typo)."
+    );
   }
 
-  return steamid;
+  return steamId;
 }
 
 /**
- * Fetch the player's owned games from Steam Web API.
- * include_appinfo=1 gives basic game names directly in the response.
+ * ---------------------------------------------------------------------------
+ * Steam API fetch helpers
+ * ---------------------------------------------------------------------------
  */
-async function getOwnedGames(steamid) {
+
+/**
+ * Fetch the full owned-games response from Steam Web API.
+ * We keep the full response object because it includes both:
+ * - game_count
+ * - games array
+ */
+async function fetchOwnedGamesResponse(steamId) {
   const url = new URL(
     "https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/"
   );
-  url.searchParams.set("key", STEAM_KEY);
-  url.searchParams.set("steamid", steamid);
+  url.searchParams.set("key", STEAM_API_KEY);
+  url.searchParams.set("steamid", steamId);
   url.searchParams.set("include_appinfo", "1");
   url.searchParams.set("include_played_free_games", "1");
 
-  const response = await fetch(url);
-  const json = await response.json();
-
+  const json = await fetchJson(url, "GetOwnedGames");
   return json?.response || null;
 }
 
 /**
- * Fetch basic public player profile information.
+ * Fetch public player profile summary information from Steam Web API.
  */
-async function getPlayerSummary(steamid) {
+async function fetchPlayerSummary(steamId) {
   const url = new URL(
     "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/"
   );
-  url.searchParams.set("key", STEAM_KEY);
-  url.searchParams.set("steamids", steamid);
+  url.searchParams.set("key", STEAM_API_KEY);
+  url.searchParams.set("steamids", steamId);
 
-  const response = await fetch(url);
-  const json = await response.json();
-
+  const json = await fetchJson(url, "GetPlayerSummaries");
   return json?.response?.players?.[0] || null;
 }
 
 /**
- * Fetch store metadata for a game from Steam store API.
- * Retries once by default because the store endpoint can be inconsistent.
+ * Fetch metadata for one Steam app from the Steam store API.
+ *
+ * Notes:
+ * - The store API is sometimes less stable than the main Steam Web API.
+ * - We retry once by default after a short delay.
+ * - Results are cached per appid.
  */
-async function getAppDetails(appid, retryCount = 1) {
-  if (!appid) return null;
+async function fetchSteamStoreAppDetails(
+  appId,
+  retriesRemaining = STORE_DETAILS_RETRY_COUNT
+) {
+  if (!appId) return null;
 
-  if (appDetailsCache.has(appid)) {
-    return appDetailsCache.get(appid);
+  if (steamAppDetailsCache.has(appId)) {
+    return steamAppDetailsCache.get(appId);
   }
 
   const url = new URL("https://store.steampowered.com/api/appdetails");
-  url.searchParams.set("appids", String(appid));
+  url.searchParams.set("appids", String(appId));
   url.searchParams.set("l", "english");
 
   try {
@@ -238,48 +443,86 @@ async function getAppDetails(appid, retryCount = 1) {
     }
 
     const json = await response.json();
-    const node = json?.[appid];
-    const data = node?.success && node?.data ? node.data : null;
+    const appNode = json?.[appId];
+    const appData = appNode?.success && appNode?.data ? appNode.data : null;
 
-    if (!data && retryCount > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      return getAppDetails(appid, retryCount - 1);
+    if (!appData && retriesRemaining > 0) {
+      await sleep(STORE_DETAILS_RETRY_DELAY_MS);
+      return fetchSteamStoreAppDetails(appId, retriesRemaining - 1);
     }
 
-    appDetailsCache.set(appid, data);
-    return data;
+    steamAppDetailsCache.set(appId, appData);
+    return appData;
   } catch {
-    if (retryCount > 0) {
-      await new Promise((resolve) => setTimeout(resolve, 400));
-      return getAppDetails(appid, retryCount - 1);
+    if (retriesRemaining > 0) {
+      await sleep(STORE_DETAILS_RETRY_DELAY_MS);
+      return fetchSteamStoreAppDetails(appId, retriesRemaining - 1);
     }
 
-    appDetailsCache.set(appid, null);
+    steamAppDetailsCache.set(appId, null);
     return null;
   }
 }
 
 /**
- * Build the three play-mode axes from category data.
- * Input should be an array like:
- * [{ name: "Single-player", value: 10 }, ...]
+ * ---------------------------------------------------------------------------
+ * Data shaping helpers
+ * ---------------------------------------------------------------------------
  */
-function buildPlayModeAxes(categoryItems) {
-  const scores = {
+
+/**
+ * Reduce public player data down to only the fields needed by the frontend.
+ */
+function formatPublicPlayerSummary(playerSummary) {
+  if (!playerSummary) return null;
+
+  return {
+    personaname: playerSummary.personaname,
+    avatar:
+      playerSummary.avatarfull ||
+      playerSummary.avatarmedium ||
+      playerSummary.avatar,
+    profileurl: playerSummary.profileurl
+  };
+}
+
+/**
+ * Convert category statistics into three simplified play-mode axes.
+ *
+ * Input example:
+ * [
+ *   { name: "Single-player", value: 10 },
+ *   { name: "Online Co-op", value: 4 }
+ * ]
+ *
+ * Output example:
+ * [
+ *   {
+ *     axis: "singleMulti",
+ *     leftLabel: "Single-player",
+ *     rightLabel: "Multi-player",
+ *     leftValue: 10,
+ *     rightValue: 0
+ *   },
+ *   ...
+ * ]
+ */
+function derivePlayModeAxes(categoryStatItems) {
+  const axisScores = {
     singleMulti: { left: 0, right: 0 },
     coopPvp: { left: 0, right: 0 },
     localOnline: { left: 0, right: 0 }
   };
 
-  for (const item of categoryItems || []) {
+  for (const item of categoryStatItems || []) {
     const categoryName = item.name;
-    const value = item.value || 0;
-    const rules = CATEGORY_AXES[categoryName];
+    const categoryValue = item.value || 0;
+    const mappingRules = PLAY_MODE_AXIS_RULES[categoryName];
 
-    if (!rules) continue;
+    if (!mappingRules) continue;
 
-    for (const rule of rules) {
-      scores[rule.axis][rule.side] += value;
+    for (const rule of mappingRules) {
+      axisScores[rule.axis][rule.side] += categoryValue;
     }
   }
 
@@ -288,132 +531,132 @@ function buildPlayModeAxes(categoryItems) {
       axis: "singleMulti",
       leftLabel: "Single-player",
       rightLabel: "Multi-player",
-      leftValue: scores.singleMulti.left,
-      rightValue: scores.singleMulti.right
+      leftValue: axisScores.singleMulti.left,
+      rightValue: axisScores.singleMulti.right
     },
     {
       axis: "coopPvp",
       leftLabel: "Co-op",
       rightLabel: "PvP",
-      leftValue: scores.coopPvp.left,
-      rightValue: scores.coopPvp.right
+      leftValue: axisScores.coopPvp.left,
+      rightValue: axisScores.coopPvp.right
     },
     {
       axis: "localOnline",
       leftLabel: "Local",
       rightLabel: "Online",
-      leftValue: scores.localOnline.left,
-      rightValue: scores.localOnline.right
+      leftValue: axisScores.localOnline.left,
+      rightValue: axisScores.localOnline.right
     }
   ];
 }
 
 /**
- * Build library-level genre/category statistics from owned games.
- * For each game, we fetch store metadata, then aggregate:
- * - count-based stats
- * - playtime-weighted stats
- * - simplified play-mode axis profile
+ * Build library-level analysis data from a player's games.
  *
- * batchSize is currently 1, which is effectively serial.
- * This is slower but safer for Steam store requests.
+ * For each valid game:
+ * 1. Fetch Steam store metadata
+ * 2. Collect genres and categories
+ * 3. Build:
+ *    - count-based genre/category stats
+ *    - playtime-weighted genre/category stats
+ *    - simplified play-mode axis summaries
+ *
+ * This is intentionally processed serially rather than in large parallel batches.
+ * It is slower, but gentler on the Steam store API and easier to reason about.
  */
-async function buildLibraryProfileStats(games) {
+async function buildLibraryAnalysis(games) {
   const genreCountMap = new Map();
   const categoryCountMap = new Map();
+
   const genrePlaytimeMap = new Map();
   const categoryPlaytimeMap = new Map();
 
-  const uniqueCategoriesSet = new Set();
+  const uniqueCategoryNames = new Set();
   const skippedGames = [];
-  const gamesMeta = [];
+  const analysedGames = [];
 
   let usedGameCount = 0;
   let skippedGameCount = 0;
 
-  const batchSize = 1;
+  for (const game of games) {
+    const playtimeForeverMinutes = game.playtime_forever || 0;
+    const appDetails = await fetchSteamStoreAppDetails(game.appid);
 
-  for (let i = 0; i < games.length; i += batchSize) {
-    const batch = games.slice(i, i + batchSize);
+    if (!appDetails) {
+      skippedGameCount += 1;
 
-    const batchResults = await Promise.all(
-      batch.map(async (game) => {
-        try {
-          const detail = await getAppDetails(game.appid);
-          return { game, detail };
-        } catch {
-          return { game, detail: null };
-        }
-      })
-    );
+      skippedGames.push({
+        appid: game.appid,
+        name: game.name || "(unknown)",
+        playtime_forever_min: playtimeForeverMinutes
+      });
 
-    for (const { game, detail } of batchResults) {
-      const playtime = game.playtime_forever || 0;
+      continue;
+    }
 
-      if (!detail) {
-        skippedGameCount++;
-        skippedGames.push({
-          appid: game.appid,
-          name: game.name || "(unknown)",
-          playtime_forever_min: playtime
-        });
+    usedGameCount += 1;
+
+    const genreNames = Array.isArray(appDetails.genres)
+      ? appDetails.genres
+          .map((item) => normalizeSteamLabel(item.description))
+          .filter(Boolean)
+      : [];
+
+    const categoryNames = Array.isArray(appDetails.categories)
+      ? appDetails.categories
+          .map((item) => normalizeSteamLabel(item.description))
+          .filter(Boolean)
+      : [];
+
+    analysedGames.push({
+      appid: game.appid,
+      name: game.name || "(unknown)",
+      playtime_forever_min: playtimeForeverMinutes,
+      playtime_2weeks_min: game.playtime_2weeks || 0,
+      genres: genreNames,
+      categories: categoryNames
+    });
+
+    for (const genreName of genreNames) {
+      incrementMapValue(genreCountMap, genreName, 1);
+      incrementMapValue(genrePlaytimeMap, genreName, playtimeForeverMinutes);
+    }
+
+    for (const categoryName of categoryNames) {
+      uniqueCategoryNames.add(categoryName);
+
+      if (!TRACKED_PLAY_MODE_CATEGORIES.has(categoryName)) {
         continue;
       }
 
-      usedGameCount++;
-
-      const genres = Array.isArray(detail.genres) ? detail.genres : [];
-      const categories = Array.isArray(detail.categories)
-        ? detail.categories
-        : [];
-
-      const genreNames = genres
-        .map((item) => normalizeName(item.description))
-        .filter(Boolean);
-
-      const categoryNames = categories
-        .map((item) => normalizeName(item.description))
-        .filter(Boolean);
-
-      gamesMeta.push({
-        appid: game.appid,
-        name: game.name || "(unknown)",
-        playtime_forever_min: game.playtime_forever || 0,
-        playtime_2weeks_min: game.playtime_2weeks || 0,
-        genres: genreNames,
-        categories: categoryNames
-      });
-
-      for (const name of genreNames) {
-        addCount(genreCountMap, name, 1);
-        addCount(genrePlaytimeMap, name, playtime);
-      }
-
-      for (const name of categoryNames) {
-        uniqueCategoriesSet.add(name);
-
-        if (!USEFUL_CATEGORIES.has(name)) {
-          continue;
-        }
-
-        addCount(categoryCountMap, name, 1);
-        addCount(categoryPlaytimeMap, name, playtime);
-      }
+      incrementMapValue(categoryCountMap, categoryName, 1);
+      incrementMapValue(
+        categoryPlaytimeMap,
+        categoryName,
+        playtimeForeverMinutes
+      );
     }
   }
 
-  const countBasedGenres = toSortedArray(genreCountMap);
-  const countBasedCategories = toSortedArray(categoryCountMap, 12);
+  const countBasedGenres = mapToSortedStatItems(genreCountMap);
+  const countBasedCategories = mapToSortedStatItems(
+    categoryCountMap,
+    MAX_TRACKED_CATEGORY_COUNT
+  );
 
-  const playtimeBasedGenres = toSortedArray(genrePlaytimeMap);
-  const playtimeBasedCategories = toSortedArray(categoryPlaytimeMap, 12);
+  const playtimeBasedGenres = mapToSortedStatItems(genrePlaytimeMap);
+  const playtimeBasedCategories = mapToSortedStatItems(
+    categoryPlaytimeMap,
+    MAX_TRACKED_CATEGORY_COUNT
+  );
 
   return {
     used_game_count: usedGameCount,
     skipped_game_count: skippedGameCount,
     skipped_games: skippedGames,
-    games_meta: gamesMeta,
-    all_categories: Array.from(uniqueCategoriesSet).sort(),
+    games_meta: analysedGames,
+    all_categories: Array.from(uniqueCategoryNames).sort(),
 
     count_based: {
       genres: countBasedGenres,
@@ -426,145 +669,136 @@ async function buildLibraryProfileStats(games) {
     },
 
     mode_profile: {
-      count_based_axes: buildPlayModeAxes(countBasedCategories),
-      playtime_based_axes: buildPlayModeAxes(playtimeBasedCategories)
+      count_based_axes: derivePlayModeAxes(countBasedCategories),
+      playtime_based_axes: derivePlayModeAxes(playtimeBasedCategories)
     }
   };
 }
 
 /**
- * API endpoint for donut chart data.
- * Returns:
- * - player summary
+ * ---------------------------------------------------------------------------
+ * Routes
+ * ---------------------------------------------------------------------------
+ */
+
+/**
+ * GET /api/owned
+ *
+ * Returns the data used by the donut / top-playtime view:
+ * - steamid
+ * - public player summary
  * - total playtime
  * - top N played games
  * - remaining "other" ratio
  */
 app.get("/api/owned", async (req, res) => {
   try {
-    if (!STEAM_KEY) {
-      return res
-        .status(500)
-        .json({ error: "Missing STEAM_KEY env var on server." });
-    }
+    requireSteamApiKey();
 
-    const profile = String(req.query.profile || "").trim();
-    if (!profile) {
-      return res.status(400).json({ error: "Missing ?profile=..." });
-    }
+    const profileInput = getRequiredProfileQuery(req);
+    const topPlayedCount = parseTopPlayedCount(req.query.top_n);
 
-    const steamid = await resolveProfileToSteamId(profile);
+    const steamId = await resolveSteamProfileToId(profileInput);
 
-    const [owned, player] = await Promise.all([
-      getOwnedGames(steamid),
-      getPlayerSummary(steamid)
+    const [ownedGamesResponse, playerSummary] = await Promise.all([
+      fetchOwnedGamesResponse(steamId),
+      fetchPlayerSummary(steamId)
     ]);
 
-    const games = owned?.games || [];
-    const playedGames = games.filter((game) => (game.playtime_forever || 0) > 0);
+    const allOwnedGames = ownedGamesResponse?.games || [];
+    const playedGames = allOwnedGames.filter(
+      (game) => (game.playtime_forever || 0) > 0
+    );
 
-    const totalPlaytime = playedGames.reduce(
+    const totalPlaytimeForeverMinutes = playedGames.reduce(
       (sum, game) => sum + (game.playtime_forever || 0),
       0
     );
 
-    const gamesWithRatio = playedGames
+    const playedGamesWithRatios = playedGames
       .map((game) => {
-        const playtimeMinutes = game.playtime_forever || 0;
-        const ratio = totalPlaytime > 0 ? playtimeMinutes / totalPlaytime : 0;
+        const playtimeForeverMinutes = game.playtime_forever || 0;
+        const playtimeRatio =
+          totalPlaytimeForeverMinutes > 0
+            ? playtimeForeverMinutes / totalPlaytimeForeverMinutes
+            : 0;
 
         return {
           appid: game.appid,
           name: game.name,
-          playtime_forever_min: playtimeMinutes,
+          playtime_forever_min: playtimeForeverMinutes,
           playtime_2weeks_min: game.playtime_2weeks || 0,
-          ratio
+          ratio: playtimeRatio
         };
       })
       .sort((a, b) => b.playtime_forever_min - a.playtime_forever_min);
 
-    const topN = Number(req.query.top_n || 10);
-    const selected = gamesWithRatio.slice(0, topN);
+    const selectedGames = playedGamesWithRatios.slice(0, topPlayedCount);
 
-    const selectedRatioSum = selected.reduce(
+    const selectedRatioSum = selectedGames.reduce(
       (sum, game) => sum + (game.ratio || 0),
       0
     );
+
     const otherRatio = Math.max(0, 1 - selectedRatioSum);
 
     return res.json({
-      steamid,
-      total_game_count: owned?.game_count ?? null,
-      total_playtime_forever_min: totalPlaytime,
+      steamid: steamId,
+      total_game_count: ownedGamesResponse?.game_count ?? null,
+      total_playtime_forever_min: totalPlaytimeForeverMinutes,
 
-      player: player
-        ? {
-            personaname: player.personaname,
-            avatar: player.avatarfull || player.avatarmedium || player.avatar,
-            profileurl: player.profileurl
-          }
-        : null,
+      player: formatPublicPlayerSummary(playerSummary),
 
-      top_n: topN,
-      selected_count: selected.length,
+      top_n: topPlayedCount,
+      selected_count: selectedGames.length,
       selected_ratio_sum: selectedRatioSum,
       other_ratio: otherRatio,
-      selected
+      selected: selectedGames
     });
   } catch (error) {
-    if (error?.status && error?.message) {
-      return res.status(error.status).json({ error: error.message });
-    }
-
-    return res.status(500).json({
-      error: "Server error",
-      detail: String(error)
-    });
+    return sendRouteError(res, error);
   }
 });
 
 /**
- * API endpoint for library-level analysis.
- * Builds genre/category summaries and play-mode profile axes.
+ * GET /api/library-profile
+ *
+ * Returns library-level analysis data:
+ * - processed game count
+ * - skipped games
+ * - genre/category summaries
+ * - play-mode axis summaries
  */
 app.get("/api/library-profile", async (req, res) => {
   try {
-    if (!STEAM_KEY) {
-      return res
-        .status(500)
-        .json({ error: "Missing STEAM_KEY env var on server." });
-    }
+    requireSteamApiKey();
 
-    const profile = String(req.query.profile || "").trim();
-    if (!profile) {
-      return res.status(400).json({ error: "Missing ?profile=..." });
-    }
+    const profileInput = getRequiredProfileQuery(req);
+    const steamId = await resolveSteamProfileToId(profileInput);
 
-    const steamid = await resolveProfileToSteamId(profile);
-    const owned = await getOwnedGames(steamid);
-    const games = owned?.games || [];
+    const ownedGamesResponse = await fetchOwnedGamesResponse(steamId);
+    const allOwnedGames = ownedGamesResponse?.games || [];
 
-    const validGames = games.filter((game) => game && game.appid);
-    const stats = await buildLibraryProfileStats(validGames);
+    const validOwnedGames = allOwnedGames.filter(
+      (game) => game && game.appid
+    );
+
+    const libraryAnalysis = await buildLibraryAnalysis(validOwnedGames);
 
     return res.json({
-      steamid,
-      total_game_count: owned?.game_count ?? null,
-      processed_game_count: validGames.length,
-      ...stats
+      steamid: steamId,
+      total_game_count: ownedGamesResponse?.game_count ?? null,
+      processed_game_count: validOwnedGames.length,
+      ...libraryAnalysis
     });
   } catch (error) {
-    if (error?.status && error?.message) {
-      return res.status(error.status).json({ error: error.message });
-    }
-
-    return res.status(500).json({
-      error: "Server error",
-      detail: String(error)
-    });
+    return sendRouteError(res, error);
   }
 });
 
+/**
+ * Start the local development server.
+ */
 app.listen(PORT, () => {
   console.log(`Open http://localhost:${PORT}`);
 });

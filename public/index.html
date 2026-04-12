@@ -6,11 +6,30 @@
   <script src="https://cdn.jsdelivr.net/npm/p5@1.9.3/lib/p5.min.js"></script>
 
   <style>
+    :root {
+      --bg-top: #0f1822;
+      --bg-bottom: #09131d;
+      --page: #101923;
+      --page-border: #22394d;
+      --panel: #162231;
+      --panel-border: #27435a;
+      --titlebar: #30485d;
+      --titlebar-right: #2a3143;
+      --text: #c7d5e0;
+      --text-soft: #8ba0b3;
+      --blue: #66c0f4;
+    }
+
     html, body {
       margin: 0;
       padding: 0;
-      background: #f5f5f5;
-      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      min-height: 100%;
+      font-family: Arial, Helvetica, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(900px 560px at 18% 38%, rgba(23, 103, 90, 0.22) 0%, rgba(23, 103, 90, 0) 60%),
+        radial-gradient(900px 560px at 82% 36%, rgba(87, 32, 78, 0.20) 0%, rgba(87, 32, 78, 0) 60%),
+        linear-gradient(180deg, #0f1b27 0%, #08121c 100%);
     }
 
     #app {
@@ -21,12 +40,13 @@
 
     #ui {
       padding: 14px 0 10px;
-      background: rgba(255,255,255,0.92);
-      border-bottom: 1px solid rgba(0,0,0,0.08);
+      background: linear-gradient(180deg, rgba(24, 35, 48, 0.96) 0%, rgba(14, 22, 32, 0.96) 100%);
+      border-bottom: 1px solid rgba(102, 192, 244, 0.14);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.28);
     }
 
     #uiInner {
-      width: min(1064px, calc(100vw - 196px));
+      width: min(1180px, calc(100vw - 120px));
       margin: 0 auto;
     }
 
@@ -38,58 +58,78 @@
     }
 
     #rowLabel {
-      font-size: 14px;
-      color: #222;
+      font-size: 13px;
+      color: var(--text-soft);
       white-space: nowrap;
       line-height: 1;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
     }
 
     #profile {
       width: 100%;
       min-width: 0;
-      height: 36px;
+      height: 38px;
       padding: 0 12px;
-      border-radius: 9px;
-      border: 1px solid rgba(0,0,0,0.16);
+      border-radius: 4px;
+      border: 1px solid #355a78;
       outline: none;
       box-sizing: border-box;
       font-size: 14px;
-      background: #fff;
+      background: #0e1924;
+      color: var(--text);
+      box-shadow: inset 0 1px 2px rgba(0,0,0,0.35);
+    }
+
+    #profile::placeholder {
+      color: #6f8293;
+    }
+
+    #profile:focus {
+      border-color: var(--blue);
+      box-shadow:
+        inset 0 1px 2px rgba(0,0,0,0.35),
+        0 0 0 2px rgba(102, 192, 244, 0.15);
     }
 
     #go {
-      height: 36px;
-      min-width: 96px;
+      height: 38px;
+      min-width: 104px;
       padding: 0 16px;
-      border-radius: 9px;
-      border: 1px solid rgba(0,0,0,0.16);
-      background: #fff;
+      border-radius: 4px;
+      border: 1px solid #3aa0ff;
+      /* background: linear-gradient(180deg, #2fafff 0%, #1d7fd1 100%); */
+      background: #1999ff;
+      color: #fff;
       cursor: pointer;
       font-size: 14px;
+      font-weight: 450;
+      font-family: Arial, Helvetica, sans-serif;
+      text-shadow: none;
+      box-shadow: none;
     }
 
     #go:hover {
-      background: #fafafa;
+      /* background: linear-gradient(180deg, #49bbff 0%, #2a8fe2 100%); */
+      background: #4caffe;
     }
 
     .hint {
       margin-top: 6px;
       font-size: 12px;
       line-height: 1.4;
-      color: rgba(0,0,0,0.58);
+      color: var(--text-soft);
     }
 
     #canvasWrap {
-      padding: 6px 12px 12px;
+      padding: 18px 12px 28px;
       box-sizing: border-box;
     }
 
     #canvasWrap canvas {
       display: block;
       margin: 0 auto;
-      border-radius: 14px;
-      box-shadow: 0 6px 18px rgba(0,0,0,0.08);
-      background: #f5f5f5;
+      background: transparent;
     }
   </style>
 </head>
